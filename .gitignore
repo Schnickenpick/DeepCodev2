@@ -1,0 +1,30 @@
+# Build
+dist/
+build/
+*.spec
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+*.egg
+.eggs/
+
+# Dev
+.venv/
+venv/
+.env
+
+# Data
+.deepcode/
+
+# IDE
+.vscode/
+.idea/
+
+# Claude
+.claude/
+
+# Misc
+*.txt
