@@ -59,6 +59,17 @@ def save_config(cfg: dict):
     CONFIG_FILE.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def load_deepcode_md() -> str:
+    """Load DEEPCODE.md from current working directory if it exists."""
+    p = Path.cwd() / "DEEPCODE.md"
+    if p.exists():
+        try:
+            return p.read_text(encoding="utf-8").strip()
+        except Exception:
+            return ""
+    return ""
+
+
 def new_session(model_id: str) -> dict:
     return {
         "id": datetime.now().strftime("%Y%m%d_%H%M%S"),

@@ -11,7 +11,13 @@ from .models import PROVIDERS, TIER_COLORS, get_model
 console = Console(highlight=False)
 
 _stream_at_line_start = True
-_streamed_lines = 0  # track how many lines were printed during streaming
+_streamed_lines = 0
+_notify = True
+
+
+def set_notify(enabled: bool):
+    global _notify
+    _notify = enabled
 
 
 def print_banner():
@@ -57,12 +63,13 @@ def print_help(agent: bool = False):
         ("/new",          "Start new conversation"),
         ("/history",      "Show past conversations"),
         ("/memory",       "Show remembered facts"),
+        ("/init [hint]",  "Generate DEEPCODE.md for this project"),
         ("/clear",        "Clear screen"),
         ("/exit",         "Quit"),
     ]
     console.print()
     for cmd, desc in rows:
-        console.print(f"  [bold cyan]{cmd:<20}[/bold cyan] {desc}")
+        console.print(f"  [bold cyan]{cmd:<22}[/bold cyan] {desc}")
     console.print()
 
 
@@ -125,6 +132,8 @@ def finish_stream(full_text: str):
     for line in text.splitlines():
         console.print("  " + line, markup=False, highlight=False)
     console.print()
+    if _notify:
+        print("\a", end="", flush=True)
 
 
 def print_reasoning(text: str):

@@ -14,8 +14,10 @@ BARE_JSON_RE = re.compile(r'(\{"name"\s*:\s*"[a-z_]+"\s*,\s*"args"\s*:\s*\{[^{}]
 MAX_ITERATIONS = 20
 
 
-def _build_prompt(conversation: list[dict], memory: list[str]) -> str:
+def _build_prompt(conversation: list[dict], memory: list[str], deepcode_md: str = "") -> str:
     parts = [SYSTEM_PROMPT, "\n\n"]
+    if deepcode_md:
+        parts.append(f"[Project context from DEEPCODE.md:\n{deepcode_md}\n]\n\n")
     if memory:
         facts = "\n".join(f"- {f}" for f in memory[-10:])
         parts.append(f"User facts: {facts}\n\n")
@@ -75,11 +77,11 @@ def _show_tool_result(tool_name: str, result: str, success: bool):
     c.print()
 
 
-async def run_agent(user_message: str, conversation: list[dict], memory: list[str], model_id: str):
+async def run_agent(user_message: str, conversation: list[dict], memory: list[str], model_id: str, deepcode_md: str = ""):
     conversation.append({"role": "user", "content": user_message})
 
     for iteration in range(MAX_ITERATIONS):
-        prompt = _build_prompt(conversation, memory)
+        prompt = _build_prompt(conversation, memory, deepcode_md)
         full_response = ""
 
         try:

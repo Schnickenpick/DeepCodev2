@@ -18,6 +18,7 @@ from .system_prompt import SYSTEM_PROMPT
 
 
 COMMANDS = [
+    ("/notify",   "Toggle bell notification on/off"),
     ("/agent",    "Toggle agent mode (file/shell tools)"),
     ("/model",    "Switch model — e.g. /model opus"),
     ("/models",   "List all 34 models"),
@@ -28,6 +29,7 @@ COMMANDS = [
     ("/compact",  "Summarize conversation to save context"),
     ("/history",  "Show past conversations (quick list)"),
     ("/memory",   "Show remembered facts"),
+    ("/init",     "Generate DEEPCODE.md for this project"),
     ("/keybinds", "Show all keyboard shortcuts"),
     ("/clear",    "Clear screen"),
     ("/help",     "Show all commands"),
@@ -106,6 +108,76 @@ async def _gen_title(first_message: str, model_id: str) -> str:
         return title.strip()[:50] or first_message[:40]
     except Exception:
         return first_message[:40]
+
+
+async def _init_deepcode_md(instructions: str, model_id: str) -> str:
+    """Scan cwd and generate a DEEPCODE.md file."""
+    from pathlib import Path
+    import os
+
+    cwd = Path.cwd()
+
+    # Collect file tree (max depth 3, skip common noise)
+    skip = {".git", "__pycache__", "node_modules", ".venv", "venv", "dist", "build", ".egg-info"}
+    tree_lines = []
+    for root, dirs, files in os.walk(cwd):
+        dirs[:] = [d for d in dirs if d not in skip]
+        depth = len(Path(root).relative_to(cwd).parts)
+        if depth > 3:
+            dirs.clear()
+            continue
+        indent = "  " * depth
+        rel = Path(root).relative_to(cwd)
+        if depth > 0:
+            tree_lines.append(f"{indent}{rel.name}/")
+        for f in files:
+            tree_lines.append(f"{'  ' * (depth+1)}{f}")
+
+    tree = "\n".join(tree_lines[:150])
+
+    # Read key files if they exist
+    key_files = ["README.md", "pyproject.toml", "package.json", "Cargo.toml", "go.mod", "requirements.txt"]
+    snippets = []
+    for kf in key_files:
+        p = cwd / kf
+        if p.exists():
+            try:
+                content = p.read_text(encoding="utf-8")[:800]
+                snippets.append(f"--- {kf} ---\n{content}")
+            except Exception:
+                pass
+
+    extra = f"\nExtra instructions: {instructions}" if instructions else ""
+    prompt = f"""You are generating a DEEPCODE.md file for a software project. This file is like a CLAUDE.md — it gives an AI assistant persistent context about the project so it can help more effectively.
+
+Project file tree:
+{tree}
+
+{"Key files:" if snippets else ""}
+{chr(10).join(snippets)}
+{extra}
+
+Write a DEEPCODE.md that includes:
+- What this project is and does
+- Tech stack and key dependencies
+- Project structure overview
+- How to run / build it
+- Any important conventions or notes an AI should know
+
+Be concise. Use markdown headers. No fluff."""
+
+    result = ""
+    renderer.print_info("Generating DEEPCODE.md...")
+    try:
+        async for chunk in api.stream_chat(prompt, model_id):
+            if chunk.get("delta"):
+                result += chunk["delta"]
+            if chunk.get("done"):
+                break
+    except Exception as e:
+        renderer.print_error(str(e))
+        return ""
+    return result.strip()
 
 
 async def _compact_conversation(conversation: list[dict], model_id: str) -> str:
@@ -192,7 +264,7 @@ def _session_browser(sessions: list[dict]) -> dict | None:
         _render(selected)
 
 
-async def run_chat_stream(message: str, model_id: str, mode: str, memory: list[str]):
+async def run_chat_stream(message: str, model_id: str, mode: str, memory: list[str], deepcode_md: str = ""):
     full_content = ""
     reasoning = ""
     t0 = time.time()
@@ -225,11 +297,13 @@ async def run_chat_stream(message: str, model_id: str, mode: str, memory: list[s
                     break
 
         else:
+            extra = ""
+            if deepcode_md:
+                extra += f"\n\n[Project context from DEEPCODE.md:\n{deepcode_md}\n]"
             if memory:
                 facts = "\n".join(f"- {f}" for f in memory[-15:])
-                prompt = f"{SYSTEM_PROMPT}\n\n[User context:\n{facts}\n]\n\nUser: {message}\nAssistant:"
-            else:
-                prompt = f"{SYSTEM_PROMPT}\n\nUser: {message}\nAssistant:"
+                extra += f"\n\n[User context:\n{facts}\n]"
+            prompt = f"{SYSTEM_PROMPT}{extra}\n\nUser: {message}\nAssistant:"
 
             async for chunk in api.stream_chat(prompt, model_id):
                 if chunk.get("delta"):
@@ -271,6 +345,7 @@ async def main_loop():
     model_id = cfg.get("model", DEFAULT_MODEL)
     mode = cfg.get("mode", "chat")
     agent_mode = cfg.get("agent", False)
+    renderer.set_notify(cfg.get("notify", True))
 
     storage.ensure_dir()
     history_path = storage.DATA_DIR / "prompt_history"
@@ -292,6 +367,9 @@ async def main_loop():
 
     sessions = storage.load_history()
     memory = storage.load_memory()
+    deepcode_md = storage.load_deepcode_md()
+    if deepcode_md:
+        renderer.print_info("DEEPCODE.md loaded.")
     current_session = storage.new_session(model_id)
     agent_conversation: list[dict] = []
     stream_task = None
@@ -404,6 +482,15 @@ async def main_loop():
                 agent_conversation = []
                 renderer.print_model_status(model_id, mode, agent_mode)
 
+            elif cmd == "/init":
+                content = await _init_deepcode_md(arg, model_id)
+                if content:
+                    from pathlib import Path
+                    out = Path.cwd() / "DEEPCODE.md"
+                    out.write_text(content, encoding="utf-8")
+                    deepcode_md = content
+                    renderer.print_info(f"DEEPCODE.md written to {out}")
+
             elif cmd == "/memory":
                 renderer.print_memory(memory)
 
@@ -418,6 +505,13 @@ async def main_loop():
                         count = len(s.get("messages", []))
                         renderer.console.print(f"  [cyan]{title[:50]}[/cyan]  [dim]{count} messages · {s['id']}[/dim]")
                     renderer.console.print()
+
+            elif cmd == "/notify":
+                new_state = not renderer._notify
+                renderer.set_notify(new_state)
+                cfg["notify"] = new_state
+                storage.save_config(cfg)
+                renderer.print_info(f"Bell notifications {'ON' if new_state else 'OFF'}.")
 
             elif cmd == "/keybinds":
                 renderer.print_keybinds()
@@ -440,9 +534,9 @@ async def main_loop():
             )
 
         if agent_mode and mode == "chat":
-            content, agent_conversation = await run_agent(text, agent_conversation, memory, model_id)
+            content, agent_conversation = await run_agent(text, agent_conversation, memory, model_id, deepcode_md)
         else:
-            content, reasoning = await run_chat_stream(text, model_id, mode, memory)
+            content, reasoning = await run_chat_stream(text, model_id, mode, memory, deepcode_md)
             content = content  # already handled
 
         if content:
