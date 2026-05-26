@@ -76,6 +76,22 @@ pip install pyinstaller appdirs
 python -m PyInstaller deepcode.spec --clean
 ```
 
+## Antivirus False Positives
+
+Some antivirus tools flag `deepcode.exe`. These are false positives caused by PyInstaller, not malicious code.
+
+**Why it happens:** PyInstaller bundles Python, all dependencies, and your code into a single `.exe`. The bootloader that unpacks everything at runtime looks similar to self-extracting malware to heuristic scanners — even when the code inside is completely clean.
+
+**Specific flags explained:**
+
+- **Software Packing** — PyInstaller compresses everything into one file. Every PyInstaller exe gets this flag.
+- **QueryPerformanceCounter** — PyInstaller's bootloader uses this for timing during startup. Not VM detection, standard bootloader behavior.
+- **Persistence / Privilege Escalation** — `install.bat` writes to the registry to add the install folder to PATH. That's all. Any installer does this.
+- **vcruntime140.dll** — PyInstaller ships its own copy of the C++ runtime. Normal, not sideloading.
+- **Bkav Pro / SecureAge flagging** — both are known for false positives on any PyInstaller binary. 67/69 vendors on VirusTotal say clean, including Windows Defender, Bitdefender, CrowdStrike, and Kaspersky.
+
+**Verify it yourself:** The full source code is in this repo. Build it from source using the instructions above and you'll get the same exe with the same flags — because they come from PyInstaller, not the code.
+
 ## License
 
 MIT
