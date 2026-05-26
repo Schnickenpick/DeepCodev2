@@ -55,17 +55,19 @@ def print_model_status(model_id: str, mode: str = "chat", agent: bool = False):
 
 def print_help(agent: bool = False):
     rows = [
-        ("/model [name]", "Switch model — e.g. /model opus"),
-        ("/models",       "List all 34 models"),
-        ("/agent",        f"Toggle agent mode (tools) — currently {'[green]ON[/green]' if agent else '[dim]OFF[/dim]'}"),
-        ("/merge",        "Toggle Merge AI mode"),
-        ("/search",       "Toggle Web Search mode"),
-        ("/new",          "Start new conversation"),
-        ("/history",      "Show past conversations"),
-        ("/memory",       "Show remembered facts"),
-        ("/init [hint]",  "Generate DEEPCODE.md for this project"),
-        ("/clear",        "Clear screen"),
-        ("/exit",         "Quit"),
+        ("/model [name]",        "Switch model — e.g. /model opus"),
+        ("/models",              "List all 34 models"),
+        ("/agent",               f"Toggle agent mode (tools) — currently {'[green]ON[/green]' if agent else '[dim]OFF[/dim]'}"),
+        ("/reasoning [level]",   "Set reasoning — off/low/middle/high/ultra"),
+        ("/merge",               "Toggle Merge AI mode"),
+        ("/search",              "Toggle Web Search mode"),
+        ("/new",                 "Start new conversation"),
+        ("/history",             "Show past conversations"),
+        ("/memory",              "Show remembered facts"),
+        ("/init [hint]",         "Generate DEEPCODE.md for this project"),
+        ("/notify",              "Toggle bell notification on/off"),
+        ("/clear",               "Clear screen"),
+        ("/exit",                "Quit"),
     ]
     console.print()
     for cmd, desc in rows:

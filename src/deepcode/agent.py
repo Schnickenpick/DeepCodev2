@@ -7,9 +7,7 @@ from .tools import TOOL_REGISTRY, ToolError, TOOL_DESCRIPTIONS
 from .permissions import ask_permission, OPTION_DENY
 from .system_prompt import SYSTEM_PROMPT
 
-# Match <tool>{...}</tool> OR bare {...} JSON tool calls
 TOOL_TAG_RE = re.compile(r'<tool>\s*(\{.*?\})\s*</tool>', re.DOTALL)
-BARE_JSON_RE = re.compile(r'(\{"name"\s*:\s*"[a-z_]+"\s*,\s*"args"\s*:\s*\{[^{}]*(?:\{[^{}]*\}[^{}]*)?\}(?:\s*\})?)', re.DOTALL)
 
 MAX_ITERATIONS = 20
 
@@ -34,6 +32,50 @@ def _build_prompt(conversation: list[dict], memory: list[str], deepcode_md: str 
     return "".join(parts)
 
 
+def _extract_json_objects(text: str) -> list[tuple[str, dict]]:
+    """Find all top-level JSON objects in text using brace counting. Returns (match_str, parsed) pairs."""
+    results = []
+    i = 0
+    while i < len(text):
+        if text[i] != '{':
+            i += 1
+            continue
+        depth = 0
+        in_string = False
+        escape = False
+        start = i
+        for j in range(i, len(text)):
+            ch = text[j]
+            if escape:
+                escape = False
+                continue
+            if ch == '\\' and in_string:
+                escape = True
+                continue
+            if ch == '"':
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if ch == '{':
+                depth += 1
+            elif ch == '}':
+                depth -= 1
+                if depth == 0:
+                    candidate = text[start:j+1]
+                    try:
+                        obj = json.loads(candidate)
+                        if isinstance(obj, dict) and "name" in obj and "args" in obj:
+                            results.append((candidate, obj))
+                    except Exception:
+                        pass
+                    i = j + 1
+                    break
+        else:
+            break
+    return results
+
+
 def _parse_tool_calls(text: str) -> list[dict]:
     calls = []
     # Try tagged format first
@@ -46,14 +88,9 @@ def _parse_tool_calls(text: str) -> list[dict]:
             pass
     if calls:
         return calls
-    # Fallback: bare JSON
-    for m in BARE_JSON_RE.finditer(text):
-        try:
-            obj = json.loads(m.group(1))
-            if "name" in obj and "args" in obj:
-                calls.append({"match": m.group(0), "name": obj["name"], "args": obj["args"]})
-        except Exception:
-            pass
+    # Fallback: brace-counting extractor handles arbitrarily nested/long JSON
+    for match_str, obj in _extract_json_objects(text):
+        calls.append({"match": match_str, "name": obj["name"], "args": obj["args"]})
     return calls
 
 

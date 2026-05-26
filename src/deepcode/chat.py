@@ -15,11 +15,13 @@ from . import api, renderer, storage
 from .models import DEFAULT_MODEL, find_model, MODELS
 from .agent import run_agent
 from .system_prompt import SYSTEM_PROMPT
+from .reasoning import run_reasoning, LEVELS as REASONING_LEVELS
 
 
 COMMANDS = [
-    ("/notify",   "Toggle bell notification on/off"),
-    ("/agent",    "Toggle agent mode (file/shell tools)"),
+    ("/notify",    "Toggle bell notification on/off"),
+    ("/reasoning", "Set reasoning level — off/low/middle/high/ultra"),
+    ("/agent",     "Toggle agent mode (file/shell tools)"),
     ("/model",    "Switch model — e.g. /model opus"),
     ("/models",   "List all 34 models"),
     ("/merge",    "Toggle Merge AI mode"),
@@ -345,6 +347,7 @@ async def main_loop():
     model_id = cfg.get("model", DEFAULT_MODEL)
     mode = cfg.get("mode", "chat")
     agent_mode = cfg.get("agent", False)
+    reasoning_level = cfg.get("reasoning", None)  # None = off
     renderer.set_notify(cfg.get("notify", True))
 
     storage.ensure_dir()
@@ -380,6 +383,7 @@ async def main_loop():
             if agent_mode:          indicators.append("agent")
             if mode == "merge":     indicators.append("merge")
             elif mode == "search":  indicators.append("search")
+            if reasoning_level:     indicators.append(f"reasoning:{reasoning_level}")
             prefix = f"[{', '.join(indicators)}] " if indicators else ""
 
             raw = await asyncio.get_event_loop().run_in_executor(
@@ -506,6 +510,20 @@ async def main_loop():
                         renderer.console.print(f"  [cyan]{title[:50]}[/cyan]  [dim]{count} messages · {s['id']}[/dim]")
                     renderer.console.print()
 
+            elif cmd == "/reasoning":
+                lvl = arg.lower().strip()
+                if lvl == "off" or (not lvl and reasoning_level):
+                    reasoning_level = None
+                    cfg["reasoning"] = None
+                    renderer.print_info("Reasoning OFF.")
+                elif lvl in REASONING_LEVELS:
+                    reasoning_level = lvl
+                    cfg["reasoning"] = lvl
+                    renderer.print_info(f"Reasoning: {lvl}")
+                else:
+                    renderer.print_error(f"Unknown level '{lvl}'. Use: off, low, middle, high, ultra")
+                storage.save_config(cfg)
+
             elif cmd == "/notify":
                 new_state = not renderer._notify
                 renderer.set_notify(new_state)
@@ -535,6 +553,17 @@ async def main_loop():
 
         if agent_mode and mode == "chat":
             content, agent_conversation = await run_agent(text, agent_conversation, memory, model_id, deepcode_md)
+        elif reasoning_level and mode == "chat":
+            memory_block = ""
+            if deepcode_md:
+                memory_block += f"[Project context from DEEPCODE.md:\n{deepcode_md}\n]"
+            if memory:
+                facts = "\n".join(f"- {f}" for f in memory[-15:])
+                memory_block += f"\n\n[User context:\n{facts}\n]"
+            renderer.print_assistant_header(model_id)
+            content = await run_reasoning(text, model_id, reasoning_level, SYSTEM_PROMPT, memory_block.strip())
+            renderer.finish_stream(content)
+            reasoning = None
         else:
             content, reasoning = await run_chat_stream(text, model_id, mode, memory, deepcode_md)
             content = content  # already handled
