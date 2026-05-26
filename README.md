@@ -28,9 +28,15 @@ Free AI in your terminal. 34 models, no account, no API key, no limits.
 
 **Merge AI** — sends your prompt to GPT, Claude, and Gemini simultaneously and combines the best answer. Toggle with `/merge`.
 
+**Reasoning mode** — multi-step self-reflection before answering. AI thinks, critiques itself, plans, then executes. Levels: `low`, `middle`, `high`, `ultra`. Toggle with `/reasoning <level>`.
+
+**DEEPCODE.md** — project-aware context. Run `/init` in any project folder to generate a file that gets injected into every prompt automatically.
+
 **Memory** — remembers facts about you and your projects across sessions.
 
 **Session history** — resume past conversations with `/session`.
+
+**Bell notifications** — get a terminal bell when a response finishes. Toggle with `/notify`.
 
 ## Commands
 
@@ -44,6 +50,9 @@ Free AI in your terminal. 34 models, no account, no API key, no limits.
 | `/session` | Browse and resume past conversations |
 | `/new` | Start a new conversation |
 | `/compact` | Summarize conversation to save context |
+| `/reasoning <level>` | Set reasoning — off/low/middle/high/ultra |
+| `/init [hint]` | Generate DEEPCODE.md for this project |
+| `/notify` | Toggle bell notification on/off |
 | `/memory` | Show remembered facts |
 | `/clear` | Clear the screen |
 | `/help` | Show all commands |
