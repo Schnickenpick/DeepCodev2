@@ -120,16 +120,47 @@ async def run_agent(user_message: str, conversation: list[dict], memory: list[st
     for iteration in range(MAX_ITERATIONS):
         prompt = _build_prompt(conversation, memory, deepcode_md)
         full_response = ""
+        _show_thinking_dot = True
+
+        async def _stream_with_indicator():
+            nonlocal full_response, _show_thinking_dot
+            import asyncio
+            dot_task = asyncio.get_event_loop().create_task(_thinking_dots())
+            try:
+                async for chunk in api.stream_chat(prompt, model_id):
+                    if chunk.get("error"):
+                        renderer.print_error(chunk["error"])
+                        break
+                    if chunk.get("done"):
+                        break
+                    delta = chunk.get("delta", "")
+                    if delta:
+                        full_response += delta
+            finally:
+                _show_thinking_dot = False
+                dot_task.cancel()
+                try:
+                    await asyncio.shield(dot_task)
+                except Exception:
+                    pass
+                sys.stdout.write("\033[2K\r")
+                sys.stdout.flush()
+
+        async def _thinking_dots():
+            import asyncio
+            frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+            i = 0
+            try:
+                while _show_thinking_dot:
+                    sys.stdout.write(f"\r  \033[2m{frames[i % len(frames)]} thinking...\033[0m")
+                    sys.stdout.flush()
+                    i += 1
+                    await asyncio.sleep(0.1)
+            except asyncio.CancelledError:
+                pass
 
         try:
-            async for chunk in api.stream_chat(prompt, model_id):
-                if chunk.get("delta"):
-                    full_response += chunk["delta"]
-                if chunk.get("error"):
-                    renderer.print_error(chunk["error"])
-                    break
-                if chunk.get("done"):
-                    break
+            await _stream_with_indicator()
         except Exception as e:
             renderer.print_error(str(e))
             break
@@ -137,7 +168,6 @@ async def run_agent(user_message: str, conversation: list[dict], memory: list[st
         tool_calls = _parse_tool_calls(full_response)
         visible = _strip_tool_calls(full_response, tool_calls).strip()
 
-        # Only print model name + text if there's actual text
         if visible:
             renderer.print_assistant_header(model_id)
             renderer.finish_stream(visible)

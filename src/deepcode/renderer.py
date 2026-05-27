@@ -66,6 +66,7 @@ def print_help(agent: bool = False):
         ("/memory",              "Show remembered facts"),
         ("/init [hint]",         "Generate DEEPCODE.md for this project"),
         ("/notify",              "Toggle bell notification on/off"),
+        ("/quizmaxoptions [n]",  "Set max quiz options (default 5)"),
         ("/clear",               "Clear screen"),
         ("/exit",                "Quit"),
     ]
@@ -205,4 +206,14 @@ def print_memory(facts: list):
     console.print("  [bold]Remembered Facts[/bold]")
     for f in facts:
         console.print(f"  [dim]·[/dim] {f}")
+    console.print()
+
+
+def print_quiz(options: list[str]) -> None:
+    """Render numbered quiz options. Last option is always 'Type something different'."""
+    for i, opt in enumerate(options, 1):
+        if i == len(options):
+            console.print(f"  [dim]{i}. {opt}[/dim]")
+        else:
+            console.print(f"  [bold cyan]{i}.[/bold cyan] {opt}")
     console.print()

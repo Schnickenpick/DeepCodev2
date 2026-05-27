@@ -1,5 +1,7 @@
 from __future__ import annotations
 import asyncio
+import json
+import re
 import sys
 import time
 from prompt_toolkit import PromptSession
@@ -17,25 +19,214 @@ from .agent import run_agent
 from .system_prompt import SYSTEM_PROMPT
 from .reasoning import run_reasoning, LEVELS as REASONING_LEVELS
 
+QUIZ_RE = re.compile(r'<quiz>([\s\S]*?)</quiz>')
+DEFAULT_QUIZ_MAX = 5
+
+
+def _parse_quiz(text: str, max_options: int) -> tuple[str, dict | None]:
+    """Extract quiz block. Returns (clean_text, quiz_data) or (text, None)."""
+    m = QUIZ_RE.search(text)
+    if not m:
+        return text, None
+    try:
+        data = json.loads(m.group(1).strip())
+        options = data.get("options", [])
+        if not isinstance(options, list) or not options:
+            return text, None
+        options = [str(o) for o in options[:max_options - 1]]
+        options.append("Type something different")
+        data["options"] = options
+        clean = QUIZ_RE.sub("", text).strip()
+        return clean, data
+    except Exception:
+        return text, None
+
+
+def _pick_option(options: list[str], session) -> str | None:
+    """Arrow-key option picker. Returns chosen option text, '__free__' for last option, or None if cancelled."""
+    import msvcrt
+
+    selected = 0
+    total = len(options)
+
+    def _render(sel: int):
+        for i, opt in enumerate(options):
+            if i == sel:
+                if i == total - 1:
+                    renderer.console.print(f"  [bold cyan]❯[/bold cyan] [dim]{opt}[/dim]")
+                else:
+                    renderer.console.print(f"  [bold cyan]❯ {opt}[/bold cyan]")
+            else:
+                if i == total - 1:
+                    renderer.console.print(f"    [dim]{opt}[/dim]")
+                else:
+                    renderer.console.print(f"    {opt}")
+
+    _render(selected)
+
+    while True:
+        ch = msvcrt.getwch()
+        if ch in ("\x00", "\xe0"):
+            ch2 = msvcrt.getwch()
+            if ch2 == "H":    # up
+                selected = (selected - 1) % total
+            elif ch2 == "P":  # down
+                selected = (selected + 1) % total
+            else:
+                continue
+        elif ch == "\r":
+            # clear rendered lines
+            for _ in range(total):
+                sys.stdout.write("\033[1A\033[2K")
+            sys.stdout.flush()
+            if selected == total - 1:
+                return "__free__"
+            renderer.console.print(f"  [dim]❯ {options[selected]}[/dim]")
+            return options[selected]
+        elif ch == "\x1b" or ch == "\x03":
+            for _ in range(total):
+                sys.stdout.write("\033[1A\033[2K")
+            sys.stdout.flush()
+            return None
+        else:
+            continue
+
+        # redraw
+        for _ in range(total):
+            sys.stdout.write("\033[1A\033[2K")
+        sys.stdout.flush()
+        _render(selected)
+
+
+async def _run_quiz_phase(
+    session: "PromptSession",
+    user_message: str,
+    model_id: str,
+    mode: str,
+    memory: list[str],
+    deepcode_md: str,
+    sys_prompt: str,
+    quiz_max_options: int,
+) -> tuple[str, str | None]:
+    """
+    Run clarification quiz phase before the real response.
+    Returns (effective_message, prefetched_final_response | None).
+    - If AI never quizzes: returns (user_message, first_response_text) — avoids double API call.
+    - If AI quizzes: collects all Q&A, returns (augmented_message, None) — caller runs real response.
+    """
+    qa_pairs: list[tuple[str, str]] = []
+
+    def _build_prompt(context_block: str) -> str:
+        extra = ""
+        if deepcode_md:
+            extra += f"\n\n[Project context from DEEPCODE.md:\n{deepcode_md}\n]"
+        if memory:
+            facts = "\n".join(f"- {f}" for f in memory[-15:])
+            extra += f"\n\n[User context:\n{facts}\n]"
+        clarify_instruction = (
+            "\n\nIf you need more information before acting, ask ONE clarifying question using a <quiz> block. "
+            "When you have enough info, respond normally without a <quiz> block."
+        )
+        return f"{sys_prompt}{extra}{clarify_instruction}\n\nUser: {user_message}{context_block}\nAssistant:"
+
+    context_block = ""
+    raw = ""
+    try:
+        async for chunk in api.stream_chat(_build_prompt(context_block), model_id):
+            if chunk.get("delta"):
+                raw += chunk["delta"]
+            if chunk.get("done"):
+                break
+    except Exception as e:
+        renderer.print_error(str(e))
+        return user_message, None
+
+    clean, quiz_data = _parse_quiz(raw, quiz_max_options)
+
+    if not quiz_data:
+        # AI didn't want to clarify — return the response as-is, no second call needed
+        return user_message, clean
+
+    # AI wants to clarify — loop through questions
+    while quiz_data:
+        question = quiz_data.get("question", "")
+        options = quiz_data["options"]
+
+        if question:
+            renderer.console.print(f"\n  [bold cyan]{question}[/bold cyan]")
+
+        # Arrow-key picker
+        result = await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda opts=options, sess=session: _pick_option(opts, sess)
+        )
+        if result is None:
+            break
+
+        if result == "__free__":
+            # "Type something different" chosen
+            try:
+                renderer.print_info("Type your answer:")
+                free_raw = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    lambda: session.prompt("  ❯ ", style=PROMPT_STYLE)
+                )
+                answer = free_raw.strip() or "No preference"
+            except (KeyboardInterrupt, EOFError):
+                break
+        else:
+            answer = result
+
+        qa_pairs.append((question or f"Question {len(qa_pairs)+1}", answer))
+
+        # Ask next question with updated context
+        qa_text = "\n".join(f"Q: {q}\nA: {a}" for q, a in qa_pairs)
+        context_block = f"\n\n[Clarification so far:\n{qa_text}\n]"
+
+        raw = ""
+        try:
+            async for chunk in api.stream_chat(_build_prompt(context_block), model_id):
+                if chunk.get("delta"):
+                    raw += chunk["delta"]
+                if chunk.get("done"):
+                    break
+        except Exception as e:
+            renderer.print_error(str(e))
+            break
+
+        clean, quiz_data = _parse_quiz(raw, quiz_max_options)
+
+        if not quiz_data:
+            # Done clarifying — return augmented message, caller runs real response
+            qa_text = "\n".join(f"Q: {q}\nA: {a}" for q, a in qa_pairs)
+            return f"{user_message}\n\n[Clarifications:\n{qa_text}\n]", None
+
+    # Interrupted mid-quiz
+    if qa_pairs:
+        qa_text = "\n".join(f"Q: {q}\nA: {a}" for q, a in qa_pairs)
+        return f"{user_message}\n\n[Clarifications:\n{qa_text}\n]", None
+    return user_message, None
+
 
 COMMANDS = [
-    ("/notify",    "Toggle bell notification on/off"),
-    ("/reasoning", "Set reasoning level — off/low/middle/high/ultra"),
-    ("/agent",     "Toggle agent mode (file/shell tools)"),
-    ("/model",    "Switch model — e.g. /model opus"),
-    ("/models",   "List all 34 models"),
-    ("/merge",    "Toggle Merge AI mode"),
-    ("/search",   "Toggle Web Search mode"),
-    ("/session",  "Browse & resume past conversations"),
-    ("/new",      "Start new conversation"),
-    ("/compact",  "Summarize conversation to save context"),
-    ("/history",  "Show past conversations (quick list)"),
-    ("/memory",   "Show remembered facts"),
-    ("/init",     "Generate DEEPCODE.md for this project"),
-    ("/keybinds", "Show all keyboard shortcuts"),
-    ("/clear",    "Clear screen"),
-    ("/help",     "Show all commands"),
-    ("/exit",     "Quit"),
+    ("/notify",         "Toggle bell notification on/off"),
+    ("/reasoning",      "Set reasoning level — off/low/middle/high/ultra"),
+    ("/agent",          "Toggle agent mode (file/shell tools)"),
+    ("/model",          "Switch model — e.g. /model opus"),
+    ("/models",         "List all 34 models"),
+    ("/merge",          "Toggle Merge AI mode"),
+    ("/search",         "Toggle Web Search mode"),
+    ("/session",        "Browse & resume past conversations"),
+    ("/new",            "Start new conversation"),
+    ("/compact",        "Summarize conversation to save context"),
+    ("/history",        "Show past conversations (quick list)"),
+    ("/memory",         "Show remembered facts"),
+    ("/init",           "Generate DEEPCODE.md for this project"),
+    ("/quizmaxoptions", "Set max quiz options — e.g. /quizmaxoptions 4"),
+    ("/keybinds",       "Show all keyboard shortcuts"),
+    ("/clear",          "Clear screen"),
+    ("/help",           "Show all commands"),
+    ("/exit",           "Quit"),
 ]
 
 
@@ -266,10 +457,12 @@ def _session_browser(sessions: list[dict]) -> dict | None:
         _render(selected)
 
 
-async def run_chat_stream(message: str, model_id: str, mode: str, memory: list[str], deepcode_md: str = ""):
+async def run_chat_stream(message: str, model_id: str, mode: str, memory: list[str], deepcode_md: str = "", sys_prompt: str = ""):
     full_content = ""
     reasoning = ""
     t0 = time.time()
+    if not sys_prompt:
+        sys_prompt = SYSTEM_PROMPT
 
     try:
         if mode == "merge":
@@ -305,7 +498,7 @@ async def run_chat_stream(message: str, model_id: str, mode: str, memory: list[s
             if memory:
                 facts = "\n".join(f"- {f}" for f in memory[-15:])
                 extra += f"\n\n[User context:\n{facts}\n]"
-            prompt = f"{SYSTEM_PROMPT}{extra}\n\nUser: {message}\nAssistant:"
+            prompt = f"{sys_prompt}{extra}\n\nUser: {message}\nAssistant:"
 
             async for chunk in api.stream_chat(prompt, model_id):
                 if chunk.get("delta"):
@@ -334,7 +527,8 @@ async def run_chat_stream(message: str, model_id: str, mode: str, memory: list[s
 
     if full_content.strip():
         renderer.print_assistant_header(model_id, mode)
-        renderer.finish_stream(full_content)
+        display = QUIZ_RE.sub("", full_content).strip()
+        renderer.finish_stream(display)
         if reasoning:
             renderer.print_reasoning(reasoning)
         renderer.print_response_time(elapsed)
@@ -348,12 +542,23 @@ async def main_loop():
     mode = cfg.get("mode", "chat")
     agent_mode = cfg.get("agent", False)
     reasoning_level = cfg.get("reasoning", None)  # None = off
+    quiz_max_options = cfg.get("quiz_max_options", DEFAULT_QUIZ_MAX)
     renderer.set_notify(cfg.get("notify", True))
 
     storage.ensure_dir()
     history_path = storage.DATA_DIR / "prompt_history"
 
     kb = _make_bindings()
+
+    def _toolbar():
+        from .models import get_model, PROVIDERS, TIER_COLORS
+        m = get_model(model_id)
+        provider = PROVIDERS.get(m["provider"], {})
+        parts = [f" {m['name']}"]
+        if agent_mode:      parts.append("agent")
+        if mode != "chat":  parts.append(mode)
+        if reasoning_level: parts.append(f"reasoning:{reasoning_level}")
+        return "  " + "  ·  ".join(parts) + " "
 
     session = PromptSession(
         history=FileHistory(str(history_path)),
@@ -363,6 +568,7 @@ async def main_loop():
         reserve_space_for_menu=6,
         key_bindings=kb,
         multiline=False,
+        bottom_toolbar=_toolbar,
     )
 
     renderer.print_banner()
@@ -531,6 +737,19 @@ async def main_loop():
                 storage.save_config(cfg)
                 renderer.print_info(f"Bell notifications {'ON' if new_state else 'OFF'}.")
 
+            elif cmd == "/quizmaxoptions":
+                if arg.strip().isdigit():
+                    n = int(arg.strip())
+                    if 2 <= n <= 10:
+                        quiz_max_options = n
+                        cfg["quiz_max_options"] = n
+                        storage.save_config(cfg)
+                        renderer.print_info(f"Quiz max options: {n} (last is always 'Type something different')")
+                    else:
+                        renderer.print_error("Must be between 2 and 10.")
+                else:
+                    renderer.print_error(f"Usage: /quizmaxoptions <number>  (current: {quiz_max_options})")
+
             elif cmd == "/keybinds":
                 renderer.print_keybinds()
 
@@ -543,16 +762,30 @@ async def main_loop():
             continue
 
         # send message
-        current_session["messages"].append({"role": "user", "content": text, "model": model_id})
+        sys_prompt = SYSTEM_PROMPT.replace("{max_options}", str(quiz_max_options - 1))
+
+        # Quiz clarification phase — AI may ask questions before acting.
+        # Returns (effective_message, prefetched_response_or_None).
+        # If prefetched is not None, AI skipped quizzing and already answered — show it directly.
+        effective_text, prefetched = await _run_quiz_phase(
+            session, text, model_id, mode, memory, deepcode_md, sys_prompt, quiz_max_options
+        )
+
+        current_session["messages"].append({"role": "user", "content": effective_text, "model": model_id})
 
         # auto-generate title from first user message
         if len(current_session["messages"]) == 1 and not current_session.get("title"):
             asyncio.get_event_loop().create_task(
-                _set_title(current_session, text, model_id)
+                _set_title(current_session, effective_text, model_id)
             )
 
-        if agent_mode and mode == "chat":
-            content, agent_conversation = await run_agent(text, agent_conversation, memory, model_id, deepcode_md)
+        if prefetched is not None and not agent_mode and not reasoning_level and mode == "chat":
+            # AI answered directly in the quiz probe — just display it
+            renderer.print_assistant_header(model_id, mode)
+            renderer.finish_stream(prefetched)
+            content = prefetched
+        elif agent_mode and mode == "chat":
+            content, agent_conversation = await run_agent(effective_text, agent_conversation, memory, model_id, deepcode_md)
         elif reasoning_level and mode == "chat":
             memory_block = ""
             if deepcode_md:
@@ -561,12 +794,12 @@ async def main_loop():
                 facts = "\n".join(f"- {f}" for f in memory[-15:])
                 memory_block += f"\n\n[User context:\n{facts}\n]"
             renderer.print_assistant_header(model_id)
-            content = await run_reasoning(text, model_id, reasoning_level, SYSTEM_PROMPT, memory_block.strip())
+            raw_content = await run_reasoning(effective_text, model_id, reasoning_level, sys_prompt, memory_block.strip())
+            content, _ = _parse_quiz(raw_content, quiz_max_options)
             renderer.finish_stream(content)
-            reasoning = None
         else:
-            content, reasoning = await run_chat_stream(text, model_id, mode, memory, deepcode_md)
-            content = content  # already handled
+            raw_content, reasoning = await run_chat_stream(effective_text, model_id, mode, memory, deepcode_md, sys_prompt)
+            content, _ = _parse_quiz(raw_content, quiz_max_options)
 
         if content:
             current_session["messages"].append({
