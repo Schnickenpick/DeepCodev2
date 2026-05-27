@@ -8,6 +8,7 @@ from .permissions import ask_permission, OPTION_DENY
 from .system_prompt import SYSTEM_PROMPT
 
 TOOL_TAG_RE = re.compile(r'<tool>\s*(\{.*?\})\s*</tool>', re.DOTALL)
+QUIZ_RE = re.compile(r'<quiz>([\s\S]*?)</quiz>')
 
 MAX_ITERATIONS = 20
 
@@ -168,9 +169,12 @@ async def run_agent(user_message: str, conversation: list[dict], memory: list[st
         tool_calls = _parse_tool_calls(full_response)
         visible = _strip_tool_calls(full_response, tool_calls).strip()
 
-        if visible:
+        # Strip quiz block before printing — caller handles quiz display
+        visible_clean = QUIZ_RE.sub("", visible).strip()
+
+        if visible_clean:
             renderer.print_assistant_header(model_id)
-            renderer.finish_stream(visible)
+            renderer.finish_stream(visible_clean)
 
         if not tool_calls:
             conversation.append({"role": "assistant", "content": visible or full_response})
