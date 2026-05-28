@@ -726,8 +726,19 @@ async def main_loop():
                 lambda: session.prompt(f"\n  {prefix}❯ ", style=PROMPT_STYLE)
             )
         except KeyboardInterrupt:
-            renderer.print_info("\nBye!")
-            break
+            try:
+                confirm = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    lambda: session.prompt("\n  Exit DeepCode? [y/N] ", style=PROMPT_STYLE)
+                )
+            except (KeyboardInterrupt, EOFError):
+                renderer.print_info("\nBye!")
+                break
+            if confirm.strip().lower() == "y":
+                renderer.print_info("Bye!")
+                break
+            renderer.print_info("Continuing...")
+            continue
         except EOFError:
             renderer.print_info("\nBye!")
             break
