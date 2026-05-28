@@ -19,6 +19,8 @@ from .agent import run_agent
 from .system_prompt import SYSTEM_PROMPT
 from .reasoning import run_reasoning, LEVELS as REASONING_LEVELS
 
+from .permissions import _getch
+
 QUIZ_RE = re.compile(r'<quiz>([\s\S]*?)</quiz>')
 DEFAULT_QUIZ_MAX = 5
 
@@ -44,7 +46,6 @@ def _parse_quiz(text: str, max_options: int) -> tuple[str, dict | None]:
 
 def _pick_option(options: list[str], session) -> str | None:
     """Arrow-key option picker. Returns chosen option text, '__free__' for last option, or None if cancelled."""
-    import msvcrt
 
     selected = 0
     total = len(options)
@@ -65,17 +66,13 @@ def _pick_option(options: list[str], session) -> str | None:
     _render(selected)
 
     while True:
-        ch = msvcrt.getwch()
-        if ch in ("\x00", "\xe0"):
-            ch2 = msvcrt.getwch()
-            if ch2 == "H":    # up
-                selected = (selected - 1) % total
-            elif ch2 == "P":  # down
-                selected = (selected + 1) % total
-            else:
-                continue
-        elif ch == "\r":
-            # clear rendered lines
+        ch = _getch()
+        if ch == "UP":
+            selected = (selected - 1) % total
+        elif ch == "DOWN":
+            selected = (selected + 1) % total        
+        elif ch == "ENTER":
+            # clear rendered lines            
             for _ in range(total):
                 sys.stdout.write("\033[1A\033[2K")
             sys.stdout.flush()
@@ -83,7 +80,7 @@ def _pick_option(options: list[str], session) -> str | None:
                 return "__free__"
             renderer.console.print(f"  [dim]❯ {options[selected]}[/dim]")
             return options[selected]
-        elif ch == "\x1b" or ch == "\x03":
+        elif ch == "ESC" or ch == "\x03":
             for _ in range(total):
                 sys.stdout.write("\033[1A\033[2K")
             sys.stdout.flush()
