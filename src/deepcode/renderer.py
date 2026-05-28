@@ -53,26 +53,19 @@ def print_model_status(model_id: str, mode: str = "chat", agent: bool = False):
     console.print()
 
 
-def print_help(agent: bool = False):
-    rows = [
-        ("/model [name]",        "Switch model — e.g. /model opus"),
-        ("/models",              "List all 34 models"),
-        ("/agent",               f"Toggle agent mode (tools) — currently {'[green]ON[/green]' if agent else '[dim]OFF[/dim]'}"),
-        ("/reasoning [level]",   "Set reasoning — off/low/middle/high/ultra"),
-        ("/merge",               "Toggle Merge AI mode"),
-        ("/search",              "Toggle Web Search mode"),
-        ("/new",                 "Start new conversation"),
-        ("/history",             "Show past conversations"),
-        ("/memory",              "Show remembered facts"),
-        ("/init [hint]",         "Generate DEEPCODE.md for this project"),
-        ("/notify",              "Toggle bell notification on/off"),
-        ("/quizmaxoptions [n]",  "Set max quiz options (default 5)"),
-        ("/clear",               "Clear screen"),
-        ("/exit",                "Quit"),
-    ]
-    console.print()
+def print_help(agent: bool = False, commands=None):
+    rows = commands or []
+    # Patch agent status into description dynamically
+    patched = []
     for cmd, desc in rows:
-        console.print(f"  [bold cyan]{cmd:<22}[/bold cyan] {desc}")
+        if cmd == "/agent":
+            desc = f"Toggle agent mode (tools) — currently {'[green]ON[/green]' if agent else '[dim]OFF[/dim]'}"
+        patched.append((cmd, desc))
+    console.print()
+    col = max((len(cmd) for cmd, _ in patched), default=10) + 2
+    for cmd, desc in patched:
+        spaces = " " * (col - len(cmd))
+        console.print(f"  [bold cyan]{cmd}[/bold cyan]{spaces}{desc}")
     console.print()
 
 

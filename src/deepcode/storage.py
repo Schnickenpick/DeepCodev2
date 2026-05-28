@@ -59,6 +59,31 @@ def save_config(cfg: dict):
     CONFIG_FILE.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+SOUL_FILE = DATA_DIR / "SOUL.md"
+SOUL_MAX_CHARS = 1024
+
+
+def load_soul_md() -> str:
+    """Load SOUL.md from ~/.deepcode/SOUL.md — global personality, hard-capped at 1024 chars."""
+    ensure_dir()
+    if not SOUL_FILE.exists():
+        return ""
+    try:
+        return SOUL_FILE.read_text(encoding="utf-8").strip()[:SOUL_MAX_CHARS]
+    except Exception:
+        return ""
+
+
+def save_soul_md(content: str):
+    ensure_dir()
+    SOUL_FILE.write_text(content[:SOUL_MAX_CHARS], encoding="utf-8")
+
+
+def delete_soul_md():
+    if SOUL_FILE.exists():
+        SOUL_FILE.unlink()
+
+
 def load_deepcode_md() -> str:
     """Load DEEPCODE.md from current working directory if it exists."""
     p = Path.cwd() / "DEEPCODE.md"

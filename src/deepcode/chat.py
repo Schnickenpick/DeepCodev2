@@ -220,6 +220,8 @@ COMMANDS = [
     ("/memory",         "Show remembered facts"),
     ("/init",           "Generate DEEPCODE.md for this project"),
     ("/quizmaxoptions", "Set max quiz options — e.g. /quizmaxoptions 4"),
+    ("/soul",           "View/generate/reset/path — DeepCode personality (SOUL.md)"),
+    ("/plan",           "Plan a task step-by-step, then execute or refine"),
     ("/keybinds",       "Show all keyboard shortcuts"),
     ("/clear",          "Clear screen"),
     ("/help",           "Show all commands"),
@@ -454,6 +456,136 @@ def _session_browser(sessions: list[dict]) -> dict | None:
         _render(selected)
 
 
+async def _run_plan(
+    task: str,
+    model_id: str,
+    memory: list[str],
+    deepcode_md: str,
+    soul_md: str,
+    session,
+    agent_conversation: list[dict],
+) -> list[dict]:
+    """Generate a plan for task, show it, let user execute/refine/cancel. Returns updated agent_conversation."""
+    from rich.panel import Panel
+    from rich.padding import Padding
+
+    extra = ""
+    if soul_md:
+        extra += f"[Personality:\n{soul_md}\n]\n\n"
+    if deepcode_md:
+        extra += f"[Project context:\n{deepcode_md}\n]\n\n"
+    if memory:
+        facts = "\n".join(f"- {f}" for f in memory[-15:])
+        extra += f"[User context:\n{facts}\n]\n\n"
+
+    plan_prompt = (
+        f"{extra}You are a planning assistant. The user wants to accomplish the following task:\n\n"
+        f"{task}\n\n"
+        "Generate a clear, numbered step-by-step plan. For each step include:\n"
+        "- What to do\n"
+        "- Why (one sentence)\n"
+        "- Any risk or caveat (if relevant)\n\n"
+        "Be concrete and actionable. No fluff. Output ONLY the plan, no intro text."
+    )
+
+    renderer.print_info("Planning...")
+    plan_text = ""
+    try:
+        async for chunk in api.stream_chat(plan_prompt, model_id):
+            if chunk.get("delta"):
+                plan_text += chunk["delta"]
+            if chunk.get("done"):
+                break
+    except Exception as e:
+        renderer.print_error(str(e))
+        return agent_conversation
+
+    plan_text = plan_text.strip()
+
+    # Display plan in a panel
+    renderer.console.print()
+    renderer.console.print(Padding(
+        Panel(
+            plan_text,
+            title="[bold cyan]Plan[/bold cyan]",
+            border_style="cyan",
+            padding=(0, 1),
+        ),
+        pad=(0, 0, 0, 2),
+    ))
+
+    # Ask what to do
+    options = ["Execute this plan", "Refine the plan", "Cancel"]
+    renderer.console.print(f"\n  [bold cyan]What do you want to do?[/bold cyan]")
+    renderer.print_quiz(options)
+    choice = _pick_option(options, session)
+
+    if choice is None or choice == "Cancel":
+        renderer.print_info("Plan cancelled.")
+        return agent_conversation
+
+    if choice == "__free__" or choice == "Refine the plan":
+        try:
+            renderer.print_info("What should be changed?")
+            feedback = await asyncio.get_event_loop().run_in_executor(
+                None, lambda: session.prompt("  ❯ ", style=PROMPT_STYLE)
+            )
+            feedback = feedback.strip()
+        except (KeyboardInterrupt, EOFError):
+            return agent_conversation
+
+        refine_prompt = (
+            f"{extra}Here is a plan for: {task}\n\n{plan_text}\n\n"
+            f"User feedback: {feedback}\n\n"
+            "Rewrite the plan incorporating this feedback. Output ONLY the updated plan."
+        )
+        renderer.print_info("Refining...")
+        refined = ""
+        try:
+            async for chunk in api.stream_chat(refine_prompt, model_id):
+                if chunk.get("delta"):
+                    refined += chunk["delta"]
+                if chunk.get("done"):
+                    break
+        except Exception as e:
+            renderer.print_error(str(e))
+            return agent_conversation
+
+        plan_text = refined.strip()
+        renderer.console.print()
+        renderer.console.print(Padding(
+            Panel(
+                plan_text,
+                title="[bold cyan]Refined Plan[/bold cyan]",
+                border_style="cyan",
+                padding=(0, 1),
+            ),
+            pad=(0, 0, 0, 2),
+        ))
+
+        # Ask again after refinement
+        options2 = ["Execute this plan", "Cancel"]
+        renderer.console.print(f"\n  [bold cyan]Execute refined plan?[/bold cyan]")
+        renderer.print_quiz(options2)
+        choice2 = _pick_option(options2, session)
+        if choice2 is None or choice2 == "Cancel" or choice2 == "__free__":
+            renderer.print_info("Plan cancelled.")
+            return agent_conversation
+
+    # Execute — pass plan + task to agent
+    execute_msg = (
+        f"Execute the following plan for this task: {task}\n\n"
+        f"Plan:\n{plan_text}\n\n"
+        "CRITICAL: Do NOT narrate, do NOT ask clarifying questions in plain text, do NOT say 'Starting with step X'. "
+        "Your FIRST output must be a tool call. No exceptions. "
+        "If you need clarification use a <quiz> block — otherwise proceed with best judgment. "
+        "Only speak after tool results confirm work. Execute every step until fully done."
+    )
+    renderer.print_info("Executing plan...")
+    _, agent_conversation = await run_agent(execute_msg, agent_conversation, memory, model_id, deepcode_md)
+    return agent_conversation
+
+
 async def run_chat_stream(message: str, model_id: str, mode: str, memory: list[str], deepcode_md: str = "", sys_prompt: str = ""):
     full_content = ""
     reasoning = ""
@@ -574,8 +706,11 @@ async def main_loop():
     sessions = storage.load_history()
     memory = storage.load_memory()
     deepcode_md = storage.load_deepcode_md()
+    soul_md = storage.load_soul_md()
     if deepcode_md:
         renderer.print_info("DEEPCODE.md loaded.")
+    if soul_md:
+        renderer.print_info("SOUL.md loaded.")
     current_session = storage.new_session(model_id)
     agent_conversation: list[dict] = []
     stream_task = None
@@ -747,19 +882,83 @@ async def main_loop():
                 else:
                     renderer.print_error(f"Usage: /quizmaxoptions <number>  (current: {quiz_max_options})")
 
+            elif cmd == "/soul":
+                sub = arg.strip().lower()
+                if sub == "path":
+                    renderer.print_info(str(storage.SOUL_FILE))
+                elif sub == "reset":
+                    storage.delete_soul_md()
+                    soul_md = ""
+                    renderer.print_info("SOUL.md deleted. Using default personality.")
+                elif sub == "show" or (not sub and soul_md):
+                    if soul_md:
+                        renderer.console.print()
+                        renderer.console.print(f"  [bold]SOUL.md[/bold]  [dim]{storage.SOUL_FILE}[/dim]")
+                        renderer.console.print(f"  [dim]{len(soul_md)}/1024 chars[/dim]")
+                        renderer.console.print()
+                        for line in soul_md.splitlines():
+                            renderer.console.print(f"  {line}", markup=False)
+                        renderer.console.print()
+                    else:
+                        renderer.print_info("No SOUL.md yet. Use /soul generate to create one.")
+                elif sub == "generate" or (not sub and not soul_md):
+                    renderer.print_info("Generating SOUL.md via AI...")
+                    soul_prompt = (
+                        "Generate a SOUL.md file for an AI terminal assistant called DeepCode. "
+                        "This file defines its personality, tone, and values. "
+                        "Be concise — strict 1024 character limit. "
+                        "Write in second person (\"You are...\", \"You value...\"). "
+                        "Make it direct, technical, slightly witty, no corporate speak. "
+                        "Output ONLY the raw personality text, no markdown headers, no preamble."
+                    )
+                    generated = ""
+                    try:
+                        async for chunk in api.stream_chat(soul_prompt, model_id):
+                            if chunk.get("delta"):
+                                generated += chunk["delta"]
+                            if chunk.get("done"):
+                                break
+                        generated = generated.strip()[:1024]
+                        storage.save_soul_md(generated)
+                        soul_md = generated
+                        renderer.print_info(f"SOUL.md generated ({len(generated)} chars) → {storage.SOUL_FILE}")
+                    except Exception as e:
+                        renderer.print_error(str(e))
+                else:
+                    renderer.print_info("Usage: /soul [show|generate|reset|path]")
+
+            elif cmd == "/plan":
+                if not arg.strip():
+                    renderer.print_error("Usage: /plan <task description>")
+                else:
+                    agent_conversation = await _run_plan(
+                        arg.strip(), model_id, memory, deepcode_md, soul_md, session, agent_conversation
+                    )
+
             elif cmd == "/keybinds":
                 renderer.print_keybinds()
 
             elif cmd in ("/help", "/?"):
-                renderer.print_help(agent_mode)
+                renderer.print_help(agent_mode, COMMANDS)
 
             else:
                 renderer.print_error(f"Unknown command '{cmd}'. Type /help.")
 
             continue
 
+        # Detect planning intent in natural language
+        _tl = text.lower()
+        _PLAN_TRIGGERS = ("make a plan", "plan out", "plan this", "create a plan", "write a plan", "give me a plan", "let's plan", "lets plan")
+        if any(t in _tl for t in _PLAN_TRIGGERS):
+            agent_conversation = await _run_plan(
+                text, model_id, memory, deepcode_md, soul_md, session, agent_conversation
+            )
+            continue
+
         # send message
         sys_prompt = SYSTEM_PROMPT.replace("{max_options}", str(quiz_max_options - 1))
+        if soul_md:
+            sys_prompt = f"[Personality:\n{soul_md}\n]\n\n{sys_prompt}"
 
         # Quiz clarification phase — AI may ask questions before acting.
         # Returns (effective_message, prefetched_response_or_None).
