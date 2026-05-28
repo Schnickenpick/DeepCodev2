@@ -11,12 +11,23 @@ Free AI in your terminal. 34 models, no account, no API key, no limits.
   ╚═════╝ ╚══════╝╚══════╝╚═╝          ╚═════╝ ╚═════╝ ╚═════╝ ╚══════╝
 ```
 
-## Install (Windows)
+## Install 
+
+Windows:
 
 1. Download `deepcode.exe` and `install.bat` from [Releases](https://github.com/Schnickenpick/DeepCodev2/releases)
 2. Put both files in the same folder
 3. Right-click `install.bat` → Run as Administrator
 4. Open a new terminal and type `deepcode`
+
+Linux:
+
+1. clone repo  "git clone https://github.com/Schnickenpick/DeepCodev2.git"
+2. if not installed: install python and pip 
+3. run "build.sh"
+3. run "install.sh"
+4. add ~/.local/bin to PATH
+5. run deepcode by typing "deepcode"
 
 ## Features
 
