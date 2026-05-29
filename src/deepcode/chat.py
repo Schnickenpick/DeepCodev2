@@ -991,14 +991,16 @@ async def main_loop():
         elif agent_mode and mode == "chat":
             raw_agent, agent_conversation = await run_agent(effective_text, agent_conversation, memory, model_id, deepcode_md)
             content, agent_quiz = _parse_quiz(raw_agent, quiz_max_options)
-            if agent_quiz:
+            # Loop: agent may ask multiple clarifying questions in sequence.
+            qa_pairs: list[tuple[str, str]] = []
+            while agent_quiz:
                 question = agent_quiz.get("question", "")
                 if question:
                     renderer.console.print(f"\n  [bold cyan]{question}[/bold cyan]")
                 result = _pick_option(agent_quiz["options"], session)
-                if result and result != "__free__":
-                    answer = result
-                elif result == "__free__":
+                if result is None:
+                    break
+                if result == "__free__":
                     try:
                         renderer.print_info("Type your answer:")
                         free = await asyncio.get_event_loop().run_in_executor(
@@ -1006,15 +1008,21 @@ async def main_loop():
                         )
                         answer = free.strip() or "No preference"
                     except (KeyboardInterrupt, EOFError):
-                        answer = ""
+                        break
                 else:
-                    answer = ""
-                if answer:
-                    followup = f"{effective_text}\n\n[User answered: {agent_quiz.get('question','?')} → {answer}]"
-                    raw_agent2, agent_conversation = await run_agent(followup, agent_conversation, memory, model_id, deepcode_md)
-                    content2, _ = _parse_quiz(raw_agent2, quiz_max_options)
-                    if content2:
-                        content = content2
+                    answer = result
+                qa_pairs.append((question or f"Question {len(qa_pairs)+1}", answer))
+                # Carry ALL Q&A forward so the agent has full clarification context.
+                qa_text = "\n".join(f"Q: {q}\nA: {a}" for q, a in qa_pairs)
+                followup = (
+                    f"[Clarification answers so far:\n{qa_text}\n]\n\n"
+                    "Proceed with the original task using these answers. "
+                    "Do not re-ask the same questions. If you still need more info, ask a NEW question via <quiz>; otherwise act."
+                )
+                raw_agent, agent_conversation = await run_agent(followup, agent_conversation, memory, model_id, deepcode_md)
+                content_next, agent_quiz = _parse_quiz(raw_agent, quiz_max_options)
+                if content_next:
+                    content = content_next
         elif reasoning_level and mode == "chat":
             memory_block = ""
             if deepcode_md:
