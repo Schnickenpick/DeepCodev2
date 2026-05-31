@@ -273,6 +273,10 @@ PROMPT_STYLE = Style.from_dict({
 def _make_bindings() -> KeyBindings:
     kb = KeyBindings()
 
+    @kb.add("enter")
+    def _submit(event):
+        event.current_buffer.validate_and_handle()
+
     @kb.add("c-j")
     def _newline_cj(event):
         event.current_buffer.insert_text("\n")
@@ -475,14 +479,21 @@ async def _run_plan(
         facts = "\n".join(f"- {f}" for f in memory[-15:])
         extra += f"[User context:\n{facts}\n]\n\n"
 
+    # Quiz phase — clarify before planning
+    from .system_prompt import SYSTEM_PROMPT as _SP
+    effective_task, _ = await _run_quiz_phase(
+        session, task, model_id, "chat", memory, deepcode_md, _SP, DEFAULT_QUIZ_MAX
+    )
+
     plan_prompt = (
         f"{extra}You are a planning assistant. The user wants to accomplish the following task:\n\n"
-        f"{task}\n\n"
+        f"{effective_task}\n\n"
         "Generate a clear, numbered step-by-step plan. For each step include:\n"
         "- What to do\n"
         "- Why (one sentence)\n"
         "- Any risk or caveat (if relevant)\n\n"
-        "Be concrete and actionable. No fluff. Output ONLY the plan, no intro text."
+        "Be concrete and actionable. No fluff. Output ONLY the plan, no intro text. "
+        "CRITICAL: Do NOT ask questions. Do NOT request clarification. Make reasonable assumptions and plan anyway."
     )
 
     renderer.print_info("Planning...")
@@ -573,13 +584,41 @@ async def _run_plan(
     execute_msg = (
         f"Execute the following plan for this task: {task}\n\n"
         f"Plan:\n{plan_text}\n\n"
-        "CRITICAL: Do NOT narrate, do NOT ask clarifying questions in plain text, do NOT say 'Starting with step X'. "
-        "Your FIRST output must be a tool call. No exceptions. "
+        "Execute every step using tools. Use write_file to create files, run_command to run commands. "
         "If you need clarification use a <quiz> block — otherwise proceed with best judgment. "
-        "Only speak after tool results confirm work. Execute every step until fully done."
+        "Only speak after tool results confirm work. Complete all steps."
     )
     renderer.print_info("Executing plan...")
-    _, agent_conversation = await run_agent(execute_msg, agent_conversation, memory, model_id, deepcode_md)
+    raw_agent, agent_conversation = await run_agent(execute_msg, agent_conversation, memory, model_id, deepcode_md)
+    # Handle quiz responses from agent during execution
+    content, agent_quiz = _parse_quiz(raw_agent, DEFAULT_QUIZ_MAX)
+    qa_pairs: list[tuple[str, str]] = []
+    while agent_quiz:
+        question = agent_quiz.get("question", "")
+        if question:
+            renderer.console.print(f"\n  [bold cyan]{question}[/bold cyan]")
+        result = _pick_option(agent_quiz["options"], session)
+        if result is None:
+            break
+        if result == "__free__":
+            try:
+                renderer.print_info("Type your answer:")
+                free = await asyncio.get_event_loop().run_in_executor(
+                    None, lambda: session.prompt("  ❯ ", style=PROMPT_STYLE)
+                )
+                answer = free.strip() or "No preference"
+            except (KeyboardInterrupt, EOFError):
+                break
+        else:
+            answer = result
+        qa_pairs.append((question or f"Question {len(qa_pairs)+1}", answer))
+        qa_text = "\n".join(f"Q: {q}\nA: {a}" for q, a in qa_pairs)
+        followup = (
+            f"[Clarification answers so far:\n{qa_text}\n]\n\n"
+            "Proceed with the plan using these answers. Do not re-ask the same questions. Act."
+        )
+        raw_agent, agent_conversation = await run_agent(followup, agent_conversation, memory, model_id, deepcode_md)
+        _, agent_quiz = _parse_quiz(raw_agent, DEFAULT_QUIZ_MAX)
     return agent_conversation
 
 
@@ -693,7 +732,7 @@ async def main_loop():
         complete_while_typing=True,
         reserve_space_for_menu=6,
         key_bindings=kb,
-        multiline=False,
+        multiline=True,
         bottom_toolbar=_toolbar,
     )
 

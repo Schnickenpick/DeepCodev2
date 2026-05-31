@@ -115,7 +115,7 @@ def _show_tool_result(tool_name: str, result: str, success: bool):
     c.print()
 
 
-async def run_agent(user_message: str, conversation: list[dict], memory: list[str], model_id: str, deepcode_md: str = ""):
+async def run_agent(user_message: str, conversation: list[dict], memory: list[str], model_id: str, deepcode_md: str = "", session=None):
     conversation.append({"role": "user", "content": user_message})
 
     for iteration in range(MAX_ITERATIONS):
