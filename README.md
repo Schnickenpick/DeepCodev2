@@ -84,7 +84,7 @@ Linux:
 Requires Python 3.9+.
 
 ```
-pip install httpx rich prompt_toolkit
+pip install httpx rich prompt_toolkit tiktoken
 pip install -e .
 deepcode
 ```
@@ -111,6 +111,78 @@ Some antivirus tools flag `deepcode.exe`. These are false positives caused by Py
 - **Bkav Pro / SecureAge flagging** — both are known for false positives on any PyInstaller binary. 67/69 vendors on VirusTotal say clean, including Windows Defender, Bitdefender, CrowdStrike, and Kaspersky.
 
 **Verify it yourself:** The full source code is in this repo. Build it from source using the instructions above and you'll get the same exe with the same flags — because they come from PyInstaller, not the code.
+
+## How Memory Works
+
+DeepCode remembers things about you and your projects across sessions — and stays fast even after months of use.
+
+### Three memory stores
+
+| File | What goes in it | Where |
+|---|---|---|
+| `MEMORY.md` | Personal preferences, general habits | `~/.deepcode/MEMORY.md` |
+| `USER.md` | Identity facts — name, job, skills | `~/.deepcode/USER.md` |
+| `MEMORY.md` (project) | Facts specific to the current project | `<your project>/.deepcode/MEMORY.md` |
+
+After every response, a fast background call extracts new facts from the conversation and routes them to the right file. Project-specific details (e.g. "prefers pixel art for this game") stay local to that project. Personal preferences (e.g. "prefers spaces over tabs") go global.
+
+Each file has a size cap. When a file hits 80% full, a compression pass runs automatically — duplicates get merged, stale facts get dropped, and the file stays lean.
+
+### Context window management
+
+Every message sends the full conversation history to the AI. Long sessions with big file writes can push this into the hundreds of thousands of tokens. DeepCode manages this with a multi-phase compressor:
+
+1. **Prune** — old tool outputs replaced with placeholders (free, no AI needed)
+2. **Summarize** — AI writes a structured summary of the middle of the conversation (goals, decisions, progress, next steps)
+3. **Assemble** — summary + last 6 messages kept; everything else discarded
+
+The compressor fires when the prompt hits 75% of the 133k token budget. Summaries are updated incrementally — each compression builds on the previous one rather than starting fresh, so context accumulates instead of degrading.
+
+### Diagram
+
+```mermaid
+flowchart TD
+    subgraph Startup["On startup"]
+        S1["~/.deepcode/MEMORY.md\nglobal personal facts"]
+        S2["~/.deepcode/USER.md\nidentity facts"]
+        S3["cwd/.deepcode/MEMORY.md\nproject-specific facts"]
+        S4["cwd/DEEPCODE.md\nproject context"]
+    end
+
+    subgraph HotContext["Injected into every prompt"]
+        H1["SYSTEM_PROMPT"]
+        H2["DEEPCODE.md"]
+        H3["USER.md ≤2000 chars"]
+        H4["Global MEMORY.md ≤3200 chars"]
+        H5["Project MEMORY.md ≤2000 chars"]
+    end
+
+    subgraph WorkingMem["Working memory"]
+        W1["Compressed summary"]
+        W2["Last 6 messages (protected)"]
+        W3["Tool results (capped 8k chars)"]
+    end
+
+    Startup --> HotContext
+    HotContext --> Prompt
+    WorkingMem --> Prompt
+    Prompt["Prompt sent to API"] --> Response
+
+    Response --> TokenCheck{"Over 100k tokens?"}
+    TokenCheck -- yes --> Compress["Prune → Summarize → Assemble"]
+    TokenCheck -- no --> Extract
+    Compress --> WorkingMem
+    Compress --> Extract
+
+    Extract["Extract facts after every turn"] --> Route{"global / project / user?"}
+    Route --> D1["~/.deepcode/MEMORY.md"]
+    Route --> D2["~/.deepcode/USER.md"]
+    Route --> D3["cwd/.deepcode/MEMORY.md"]
+    D1 & D2 & D3 --> CapCheck{"File at 80% full?"}
+    CapCheck -- yes --> Compress2["LLM compression\nmerge dupes, drop stale"]
+    CapCheck -- no --> Done["Saved"]
+    Compress2 --> Done
+```
 
 ## License
 
