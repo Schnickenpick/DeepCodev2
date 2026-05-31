@@ -100,10 +100,12 @@ async def _run_quiz_phase(
     user_message: str,
     model_id: str,
     mode: str,
-    memory: list[str],
+    memory_md: str,
+    user_md: str,
     deepcode_md: str,
     sys_prompt: str,
     quiz_max_options: int,
+    project_memory_md: str = "",
 ) -> tuple[str, str | None]:
     """
     Run clarification quiz phase before the real response.
@@ -117,9 +119,12 @@ async def _run_quiz_phase(
         extra = ""
         if deepcode_md:
             extra += f"\n\n[Project context from DEEPCODE.md:\n{deepcode_md}\n]"
-        if memory:
-            facts = "\n".join(f"- {f}" for f in memory[-15:])
-            extra += f"\n\n[User context:\n{facts}\n]"
+        if user_md:
+            extra += f"\n\n[User profile:\n{user_md}\n]"
+        if memory_md:
+            extra += f"\n\n[Memory:\n{memory_md}\n]"
+        if project_memory_md:
+            extra += f"\n\n[Project memory:\n{project_memory_md}\n]"
         clarify_instruction = (
             "\n\nIf you need more information before acting, ask ONE clarifying question using a <quiz> block. "
             "When you have enough info, respond normally without a <quiz> block."
@@ -460,11 +465,13 @@ def _session_browser(sessions: list[dict]) -> dict | None:
 async def _run_plan(
     task: str,
     model_id: str,
-    memory: list[str],
+    memory_md: str,
+    user_md: str,
     deepcode_md: str,
     soul_md: str,
     session,
     agent_conversation: list[dict],
+    project_memory_md: str = "",
 ) -> list[dict]:
     """Generate a plan for task, show it, let user execute/refine/cancel. Returns updated agent_conversation."""
     from rich.panel import Panel
@@ -475,14 +482,18 @@ async def _run_plan(
         extra += f"[Personality:\n{soul_md}\n]\n\n"
     if deepcode_md:
         extra += f"[Project context:\n{deepcode_md}\n]\n\n"
-    if memory:
-        facts = "\n".join(f"- {f}" for f in memory[-15:])
-        extra += f"[User context:\n{facts}\n]\n\n"
+    if user_md:
+        extra += f"[User profile:\n{user_md}\n]\n\n"
+    if memory_md:
+        extra += f"[Memory:\n{memory_md}\n]\n\n"
+    if project_memory_md:
+        extra += f"[Project memory:\n{project_memory_md}\n]\n\n"
 
     # Quiz phase — clarify before planning
     from .system_prompt import SYSTEM_PROMPT as _SP
     effective_task, _ = await _run_quiz_phase(
-        session, task, model_id, "chat", memory, deepcode_md, _SP, DEFAULT_QUIZ_MAX
+        session, task, model_id, "chat", memory_md, user_md, deepcode_md, _SP, DEFAULT_QUIZ_MAX,
+        project_memory_md=project_memory_md,
     )
 
     plan_prompt = (
@@ -589,7 +600,7 @@ async def _run_plan(
         "Only speak after tool results confirm work. Complete all steps."
     )
     renderer.print_info("Executing plan...")
-    raw_agent, agent_conversation = await run_agent(execute_msg, agent_conversation, memory, model_id, deepcode_md)
+    raw_agent, agent_conversation = await run_agent(execute_msg, agent_conversation, memory_md, user_md, model_id, deepcode_md, project_memory_md)
     # Handle quiz responses from agent during execution
     content, agent_quiz = _parse_quiz(raw_agent, DEFAULT_QUIZ_MAX)
     qa_pairs: list[tuple[str, str]] = []
@@ -617,12 +628,12 @@ async def _run_plan(
             f"[Clarification answers so far:\n{qa_text}\n]\n\n"
             "Proceed with the plan using these answers. Do not re-ask the same questions. Act."
         )
-        raw_agent, agent_conversation = await run_agent(followup, agent_conversation, memory, model_id, deepcode_md)
+        raw_agent, agent_conversation = await run_agent(followup, agent_conversation, memory_md, user_md, model_id, deepcode_md, project_memory_md)
         _, agent_quiz = _parse_quiz(raw_agent, DEFAULT_QUIZ_MAX)
     return agent_conversation
 
 
-async def run_chat_stream(message: str, model_id: str, mode: str, memory: list[str], deepcode_md: str = "", sys_prompt: str = ""):
+async def run_chat_stream(message: str, model_id: str, mode: str, memory_md: str = "", deepcode_md: str = "", sys_prompt: str = ""):
     full_content = ""
     reasoning = ""
     t0 = time.time()
@@ -660,9 +671,8 @@ async def run_chat_stream(message: str, model_id: str, mode: str, memory: list[s
             extra = ""
             if deepcode_md:
                 extra += f"\n\n[Project context from DEEPCODE.md:\n{deepcode_md}\n]"
-            if memory:
-                facts = "\n".join(f"- {f}" for f in memory[-15:])
-                extra += f"\n\n[User context:\n{facts}\n]"
+            if memory_md:
+                extra += f"\n\n[Memory:\n{memory_md}\n]"
             prompt = f"{sys_prompt}{extra}\n\nUser: {message}\nAssistant:"
 
             async for chunk in api.stream_chat(prompt, model_id):
@@ -740,7 +750,9 @@ async def main_loop():
     renderer.print_model_status(model_id, mode, agent_mode)
 
     sessions = storage.load_history()
-    memory = storage.load_memory()
+    memory_md = storage.load_memory_md()
+    user_md = storage.load_user_md()
+    project_memory_md = storage.load_project_memory_md()
     deepcode_md = storage.load_deepcode_md()
     soul_md = storage.load_soul_md()
     if deepcode_md:
@@ -881,7 +893,7 @@ async def main_loop():
                     renderer.print_info(f"DEEPCODE.md written to {out}")
 
             elif cmd == "/memory":
-                renderer.print_memory(memory)
+                renderer.print_memory(memory_md, user_md, project_memory_md)
 
             elif cmd == "/history":
                 all_s = sessions + ([current_session] if current_session["messages"] else [])
@@ -979,7 +991,7 @@ async def main_loop():
                     renderer.print_error("Usage: /plan <task description>")
                 else:
                     agent_conversation = await _run_plan(
-                        arg.strip(), model_id, memory, deepcode_md, soul_md, session, agent_conversation
+                        arg.strip(), model_id, memory_md, user_md, deepcode_md, soul_md, session, agent_conversation, project_memory_md
                     )
 
             elif cmd == "/keybinds":
@@ -998,7 +1010,7 @@ async def main_loop():
         _PLAN_TRIGGERS = ("make a plan", "plan out", "plan this", "create a plan", "write a plan", "give me a plan", "let's plan", "lets plan")
         if any(t in _tl for t in _PLAN_TRIGGERS):
             agent_conversation = await _run_plan(
-                text, model_id, memory, deepcode_md, soul_md, session, agent_conversation
+                text, model_id, memory_md, user_md, deepcode_md, soul_md, session, agent_conversation, project_memory_md
             )
             continue
 
@@ -1011,7 +1023,8 @@ async def main_loop():
         # Returns (effective_message, prefetched_response_or_None).
         # If prefetched is not None, AI skipped quizzing and already answered — show it directly.
         effective_text, prefetched = await _run_quiz_phase(
-            session, text, model_id, mode, memory, deepcode_md, sys_prompt, quiz_max_options
+            session, text, model_id, mode, memory_md, user_md, deepcode_md, sys_prompt, quiz_max_options,
+            project_memory_md=project_memory_md,
         )
 
         current_session["messages"].append({"role": "user", "content": effective_text, "model": model_id})
@@ -1028,7 +1041,7 @@ async def main_loop():
             renderer.finish_stream(prefetched)
             content = prefetched
         elif agent_mode and mode == "chat":
-            raw_agent, agent_conversation = await run_agent(effective_text, agent_conversation, memory, model_id, deepcode_md)
+            raw_agent, agent_conversation = await run_agent(effective_text, agent_conversation, memory_md, user_md, model_id, deepcode_md, project_memory_md)
             content, agent_quiz = _parse_quiz(raw_agent, quiz_max_options)
             # Loop: agent may ask multiple clarifying questions in sequence.
             qa_pairs: list[tuple[str, str]] = []
@@ -1058,7 +1071,7 @@ async def main_loop():
                     "Proceed with the original task using these answers. "
                     "Do not re-ask the same questions. If you still need more info, ask a NEW question via <quiz>; otherwise act."
                 )
-                raw_agent, agent_conversation = await run_agent(followup, agent_conversation, memory, model_id, deepcode_md)
+                raw_agent, agent_conversation = await run_agent(followup, agent_conversation, memory_md, user_md, model_id, deepcode_md, project_memory_md)
                 content_next, agent_quiz = _parse_quiz(raw_agent, quiz_max_options)
                 if content_next:
                     content = content_next
@@ -1066,15 +1079,18 @@ async def main_loop():
             memory_block = ""
             if deepcode_md:
                 memory_block += f"[Project context from DEEPCODE.md:\n{deepcode_md}\n]"
-            if memory:
-                facts = "\n".join(f"- {f}" for f in memory[-15:])
-                memory_block += f"\n\n[User context:\n{facts}\n]"
+            if user_md:
+                memory_block += f"\n\n[User profile:\n{user_md}\n]"
+            if memory_md:
+                memory_block += f"\n\n[Memory:\n{memory_md}\n]"
+            if project_memory_md:
+                memory_block += f"\n\n[Project memory:\n{project_memory_md}\n]"
             renderer.print_assistant_header(model_id)
             raw_content = await run_reasoning(effective_text, model_id, reasoning_level, sys_prompt, memory_block.strip())
             content, _ = _parse_quiz(raw_content, quiz_max_options)
             renderer.finish_stream(content)
         else:
-            raw_content, reasoning = await run_chat_stream(effective_text, model_id, mode, memory, deepcode_md, sys_prompt)
+            raw_content, reasoning = await run_chat_stream(effective_text, model_id, mode, memory_md, deepcode_md, sys_prompt)
             content, _ = _parse_quiz(raw_content, quiz_max_options)
 
         if content:
@@ -1085,11 +1101,37 @@ async def main_loop():
             })
             storage.save_history((sessions + [current_session])[-100:])
 
+            # Auto-extract facts — split into global/project/user buckets
             if len(current_session["messages"]) >= 2:
-                new_facts = await api.extract_memory(current_session["messages"][-2:], memory)
-                if new_facts:
-                    memory = list(dict.fromkeys(memory + new_facts))[-50:]
-                    storage.save_memory(memory)
+                extracted = await api.extract_memory_split(
+                    current_session["messages"][-2:], memory_md, project_memory_md, user_md
+                )
+
+                def _merge_facts(existing: str, new_facts: list[str], max_chars: int) -> str:
+                    lines = [l for l in existing.splitlines() if l.strip()]
+                    for f in new_facts:
+                        line = f"- {f}" if not f.startswith("-") else f
+                        if line not in lines:
+                            lines.append(line)
+                    return "\n".join(lines)
+
+                if extracted.get("global"):
+                    memory_md = _merge_facts(memory_md, extracted["global"], storage.MEMORY_MD_MAX_CHARS)
+                    if storage.needs_compression(memory_md, storage.MEMORY_MD_MAX_CHARS):
+                        memory_md = await api.compress_memory(memory_md, "global personal")
+                    storage.save_memory_md(memory_md)
+
+                if extracted.get("project"):
+                    project_memory_md = _merge_facts(project_memory_md, extracted["project"], storage.PROJECT_MEMORY_MAX_CHARS)
+                    if storage.needs_compression(project_memory_md, storage.PROJECT_MEMORY_MAX_CHARS):
+                        project_memory_md = await api.compress_memory(project_memory_md, "project-specific")
+                    storage.save_project_memory_md(project_memory_md)
+
+                if extracted.get("user"):
+                    user_md = _merge_facts(user_md, extracted["user"], storage.USER_MD_MAX_CHARS)
+                    if storage.needs_compression(user_md, storage.USER_MD_MAX_CHARS):
+                        user_md = await api.compress_memory(user_md, "user identity")
+                    storage.save_user_md(user_md)
 
 
 async def _set_title(session_obj: dict, first_msg: str, model_id: str):

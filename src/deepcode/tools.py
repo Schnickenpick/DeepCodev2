@@ -25,12 +25,32 @@ def read_file(path: str) -> str:
         raise ToolError(str(e))
 
 
+MAX_WRITE_CHARS = 120_000  # ~30k tokens, well under proxy limits
+
 def write_file(path: str, content: str) -> str:
+    if len(content) > MAX_WRITE_CHARS:
+        raise ToolError(
+            f"Content too large ({len(content):,} chars). Max is {MAX_WRITE_CHARS:,} chars (~30k tokens). "
+            "Split into multiple write_file + append_file calls."
+        )
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(content, encoding="utf-8")
     lines = content.count("\n") + 1
     return f"Written {lines} lines to {path}"
+
+
+def append_file(path: str, content: str) -> str:
+    if len(content) > MAX_WRITE_CHARS:
+        raise ToolError(
+            f"Content too large ({len(content):,} chars). Max is {MAX_WRITE_CHARS:,} chars. Split further."
+        )
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with p.open("a", encoding="utf-8") as f:
+        f.write(content)
+    lines = content.count("\n") + 1
+    return f"Appended {lines} lines to {path}"
 
 
 def edit_file(path: str, old_text: str, new_text: str) -> str:
@@ -119,6 +139,7 @@ def search_files(pattern: str, path: str = ".", glob: str = "*") -> str:
 TOOL_REGISTRY = {
     "read_file":    lambda args: read_file(args["path"]),
     "write_file":   lambda args: write_file(args["path"], args["content"]),
+    "append_file":  lambda args: append_file(args["path"], args["content"]),
     "edit_file":    lambda args: edit_file(args["path"], args["old_text"], args["new_text"]),
     "run_command":  lambda args: run_command(args["cmd"], args.get("cwd")),
     "list_dir":     lambda args: list_dir(args.get("path", ".")),
@@ -127,7 +148,8 @@ TOOL_REGISTRY = {
 
 TOOL_DESCRIPTIONS = {
     "read_file":    "Read file contents",
-    "write_file":   "Write content to file",
+    "write_file":   "Write content to file (max 120k chars)",
+    "append_file":  "Append content to existing file (max 120k chars)",
     "edit_file":    "Replace text in file",
     "run_command":  "Execute shell command",
     "list_dir":     "List directory contents",

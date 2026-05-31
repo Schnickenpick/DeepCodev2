@@ -12,25 +12,117 @@ QUIZ_RE = re.compile(r'<quiz>([\s\S]*?)</quiz>')
 
 MAX_ITERATIONS = 20
 
+# Context window budget: ~133k tokens (100k words). Compress at 75%.
+CONTEXT_TOKEN_LIMIT = 133_000
+COMPRESS_THRESHOLD = 0.75
+TAIL_PROTECTED = 6  # always keep last N messages uncompressed
 
-def _build_prompt(conversation: list[dict], memory: list[str], deepcode_md: str = "") -> str:
+# Tool result/assistant msg char caps (pre-compression safety)
+_MAX_TOOL_RESULT_CHARS = 8000
+_MAX_ASSISTANT_CHARS = 12000
+
+
+_tiktoken_enc = None
+
+def _get_enc():
+    global _tiktoken_enc
+    if _tiktoken_enc is None:
+        try:
+            import tiktoken
+            _tiktoken_enc = tiktoken.get_encoding("cl100k_base")
+        except Exception:
+            pass
+    return _tiktoken_enc
+
+def _count_tokens(text: str) -> int:
+    enc = _get_enc()
+    if enc:
+        try:
+            return len(enc.encode(text))
+        except Exception:
+            pass
+    return len(text) // 4
+
+
+def _build_prompt(conversation: list[dict], memory_md: str = "", user_md: str = "", deepcode_md: str = "", project_memory_md: str = "") -> str:
     parts = [SYSTEM_PROMPT, "\n\n"]
     if deepcode_md:
         parts.append(f"[Project context from DEEPCODE.md:\n{deepcode_md}\n]\n\n")
-    if memory:
-        facts = "\n".join(f"- {f}" for f in memory[-10:])
-        parts.append(f"User facts: {facts}\n\n")
+    if user_md:
+        parts.append(f"[User profile:\n{user_md}\n]\n\n")
+    if memory_md:
+        parts.append(f"[Memory:\n{memory_md}\n]\n\n")
+    if project_memory_md:
+        parts.append(f"[Project memory:\n{project_memory_md}\n]\n\n")
     for msg in conversation:
         role = msg["role"]
         content = msg["content"]
         if role == "user":
             parts.append(f"User: {content}\n\n")
         elif role == "assistant":
+            if len(content) > _MAX_ASSISTANT_CHARS:
+                content = content[:_MAX_ASSISTANT_CHARS] + "\n... [truncated]"
             parts.append(f"Assistant: {content}\n\n")
         elif role == "tool_result":
+            if len(content) > _MAX_TOOL_RESULT_CHARS:
+                content = content[:_MAX_TOOL_RESULT_CHARS] + "\n... [truncated]"
             parts.append(f"Tool result: {content}\n\n")
     parts.append("Assistant:")
     return "".join(parts)
+
+
+async def _compress_conversation(conversation: list[dict], model_id: str, prev_summary: str = "") -> tuple[list[dict], str]:
+    """Multi-phase compressor. Returns (compressed_conversation, new_summary)."""
+    if len(conversation) <= TAIL_PROTECTED * 2:
+        return conversation, prev_summary
+
+    tail = conversation[-TAIL_PROTECTED:]
+    middle = conversation[:-TAIL_PROTECTED]
+
+    # Phase 1: prune tool results in middle (free, no LLM)
+    pruned = []
+    for msg in middle:
+        if msg["role"] == "tool_result" and len(msg["content"]) > 500:
+            pruned.append({"role": "tool_result", "content": "[tool output pruned for context]"})
+        else:
+            pruned.append(msg)
+
+    # Phase 2: LLM summarize the middle
+    history_text = ""
+    for msg in pruned:
+        role = msg["role"]
+        content = msg["content"]
+        history_text += f"{role.upper()}: {content}\n\n"
+
+    update_instruction = (
+        f"Previous summary:\n{prev_summary}\n\nUpdate it with the new conversation below." if prev_summary
+        else "Summarize the conversation below."
+    )
+    summary_prompt = (
+        f"{update_instruction}\n\n"
+        f"Conversation:\n{history_text}\n\n"
+        "Write a structured summary with these sections:\n"
+        "GOALS: what the user is trying to accomplish\n"
+        "DECISIONS: key choices made\n"
+        "PROGRESS: what has been done/built so far\n"
+        "NEXT: what was planned next\n\n"
+        "Be dense and specific. Under 400 words."
+    )
+
+    summary = ""
+    try:
+        async for chunk in api.stream_chat(summary_prompt, model_id):
+            if chunk.get("delta"):
+                summary += chunk["delta"]
+            if chunk.get("done"):
+                break
+        summary = summary.strip()
+    except Exception:
+        summary = prev_summary or "[summary unavailable]"
+
+    # Phase 3: assemble — summary node + protected tail
+    compressed = [{"role": "user", "content": f"[Conversation summary]\n{summary}"}] + tail
+    return compressed, summary
 
 
 def _extract_json_objects(text: str) -> list[tuple[str, dict]]:
@@ -115,11 +207,19 @@ def _show_tool_result(tool_name: str, result: str, success: bool):
     c.print()
 
 
-async def run_agent(user_message: str, conversation: list[dict], memory: list[str], model_id: str, deepcode_md: str = "", session=None):
+async def run_agent(user_message: str, conversation: list[dict], memory_md: str, user_md: str, model_id: str, deepcode_md: str = "", project_memory_md: str = "", session=None, _summary: str = ""):
     conversation.append({"role": "user", "content": user_message})
 
     for iteration in range(MAX_ITERATIONS):
-        prompt = _build_prompt(conversation, memory, deepcode_md)
+        prompt = _build_prompt(conversation, memory_md, user_md, deepcode_md, project_memory_md)
+
+        # Compress if over threshold — cheap char estimate first, exact count only if close
+        _char_estimate = len(prompt) // 4
+        if _char_estimate > CONTEXT_TOKEN_LIMIT * COMPRESS_THRESHOLD * 0.8:
+            if _count_tokens(prompt) > CONTEXT_TOKEN_LIMIT * COMPRESS_THRESHOLD:
+                renderer.print_info("Compressing context...")
+                conversation, _summary = await _compress_conversation(conversation, model_id, _summary)
+                prompt = _build_prompt(conversation, memory_md, user_md, deepcode_md, project_memory_md)
         full_response = ""
         _show_thinking_dot = True
 

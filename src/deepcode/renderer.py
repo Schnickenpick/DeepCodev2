@@ -191,15 +191,27 @@ def render_markdown(text: str):
     console.print(Padding(Markdown(text), pad=(0, 0, 0, 2)))
 
 
-def print_memory(facts: list):
-    if not facts:
+def print_memory(memory_md: str, user_md: str = "", project_memory_md: str = ""):
+    any_content = any([memory_md.strip(), user_md.strip(), project_memory_md.strip()])
+    if not any_content:
         console.print("\n  [dim]No memories yet.[/dim]\n")
         return
     console.print()
-    console.print("  [bold]Remembered Facts[/bold]")
-    for f in facts:
-        console.print(f"  [dim]·[/dim] {f}")
-    console.print()
+    if user_md.strip():
+        console.print("  [bold cyan]User[/bold cyan]")
+        for line in user_md.strip().splitlines():
+            console.print(f"  [dim]{line}[/dim]")
+        console.print()
+    if memory_md.strip():
+        console.print("  [bold cyan]Global[/bold cyan]")
+        for line in memory_md.strip().splitlines():
+            console.print(f"  [dim]{line}[/dim]")
+        console.print()
+    if project_memory_md.strip():
+        console.print("  [bold cyan]Project[/bold cyan]")
+        for line in project_memory_md.strip().splitlines():
+            console.print(f"  [dim]{line}[/dim]")
+        console.print()
 
 
 def print_quiz(options: list[str]) -> None:
